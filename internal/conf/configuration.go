@@ -441,6 +441,10 @@ type ProviderConfiguration struct {
 	Phone                   PhoneProviderConfiguration     `json:"phone"`
 	X                       OAuthProviderConfiguration     `json:"x" envconfig:"X"`
 	Zoom                    OAuthProviderConfiguration     `json:"zoom"`
+	Line                    OAuthProviderConfiguration     `json:"line"`
+	Douyin                  OAuthProviderConfiguration     `json:"douyin"`
+	Wechat                  OAuthProviderConfiguration     `json:"wechat"`
+	WechatWork              OAuthProviderConfiguration     `json:"wechat_work" split_words:"true"`
 	IosBundleId             string                         `json:"ios_bundle_id" split_words:"true"`
 	RedirectURL             string                         `json:"redirect_url"`
 	AllowedIdTokenIssuers   []string                       `json:"allowed_id_token_issuers" split_words:"true"`
@@ -611,6 +615,8 @@ type SmsProviderConfiguration struct {
 	Messagebird  MessagebirdProviderConfiguration  `json:"messagebird"`
 	Textlocal    TextlocalProviderConfiguration    `json:"textlocal"`
 	Vonage       VonageProviderConfiguration       `json:"vonage"`
+	Tencent      TencentProviderConfiguration     `json:"tencent"`
+	Aliyun       AliyunProviderConfiguration       `json:"aliyun"`
 }
 
 func (c *SmsProviderConfiguration) GetTestOTP(phone string, now time.Time) (string, bool) {
@@ -651,6 +657,21 @@ type VonageProviderConfiguration struct {
 	From      string `json:"from" split_words:"true"`
 }
 
+type TencentProviderConfiguration struct {
+	SecretId     string `json:"secret_id" split_words:"true"`
+	SecretKey    string `json:"secret_key" split_words:"true"`
+	Region       string `json:"region" default:"ap-guangzhou"`
+	SmsSdkAppId  string `json:"sms_sdk_app_id" split_words:"true"`
+	TemplateID   string `json:"template_id" split_words:"true"`
+}
+
+type AliyunProviderConfiguration struct {
+	AccessKeyId  string `json:"access_key_id" split_words:"true"`
+	AccessKeySecret string `json:"access_key_secret" split_words:"true"`
+	SignName     string `json:"sign_name" split_words:"true"`
+	TemplateCode string `json:"template_code" split_words:"true"`
+}
+
 type CaptchaConfiguration struct {
 	Enabled  bool   `json:"enabled" default:"false"`
 	Provider string `json:"provider" default:"hcaptcha"`
@@ -662,7 +683,7 @@ func (c *CaptchaConfiguration) Validate() error {
 		return nil
 	}
 
-	if c.Provider != "hcaptcha" && c.Provider != "turnstile" {
+	if c.Provider != "hcaptcha" && c.Provider != "turnstile" && c.Provider != "tencent" {
 		return fmt.Errorf("unsupported captcha provider: %s", c.Provider)
 	}
 
@@ -1339,6 +1360,38 @@ func (t *VonageProviderConfiguration) Validate() error {
 	}
 	if t.From == "" {
 		return errors.New("missing Vonage 'from' parameter")
+	}
+	return nil
+}
+
+func (t *TencentProviderConfiguration) Validate() error {
+	if t.SecretId == "" {
+		return errors.New("missing Tencent SecretId")
+	}
+	if t.SecretKey == "" {
+		return errors.New("missing Tencent SecretKey")
+	}
+	if t.SmsSdkAppId == "" {
+		return errors.New("missing Tencent SmsSdkAppId")
+	}
+	if t.TemplateID == "" {
+		return errors.New("missing Tencent TemplateID")
+	}
+	return nil
+}
+
+func (a *AliyunProviderConfiguration) Validate() error {
+	if a.AccessKeyId == "" {
+		return errors.New("missing Aliyun AccessKeyId")
+	}
+	if a.AccessKeySecret == "" {
+		return errors.New("missing Aliyun AccessKeySecret")
+	}
+	if a.SignName == "" {
+		return errors.New("missing Aliyun SignName")
+	}
+	if a.TemplateCode == "" {
+		return errors.New("missing Aliyun TemplateCode")
 	}
 	return nil
 }

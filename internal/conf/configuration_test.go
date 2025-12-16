@@ -636,6 +636,28 @@ func TestValidate(t *testing.T) {
 				Secret:   "abc",
 			},
 		},
+		{
+			val: &CaptchaConfiguration{
+				Enabled:  true,
+				Provider: "turnstile",
+				Secret:   "abc",
+			},
+		},
+		{
+			val: &CaptchaConfiguration{
+				Enabled:  true,
+				Provider: "tencent",
+				Secret:   "",
+			},
+			err: "captcha provider secret is empty",
+		},
+		{
+			val: &CaptchaConfiguration{
+				Enabled:  true,
+				Provider: "tencent",
+				Secret:   "abc",
+			},
+		},
 
 		{
 			val: &DatabaseEncryptionConfiguration{Encrypt: false},
@@ -880,6 +902,74 @@ func TestValidate(t *testing.T) {
 				ApiKey:    "a",
 				ApiSecret: "b",
 				From:      "c",
+			},
+		},
+
+		{
+			val: &TencentProviderConfiguration{},
+			err: `missing Tencent SecretId`,
+		},
+		{
+			val: &TencentProviderConfiguration{
+				SecretId: "a",
+			},
+			err: `missing Tencent SecretKey`,
+		},
+		{
+			val: &TencentProviderConfiguration{
+				SecretId:  "a",
+				SecretKey: "b",
+			},
+			err: `missing Tencent SmsSdkAppId`,
+		},
+		{
+			val: &TencentProviderConfiguration{
+				SecretId:    "a",
+				SecretKey:   "b",
+				SmsSdkAppId: "c",
+			},
+			err: `missing Tencent TemplateID`,
+		},
+		{
+			val: &TencentProviderConfiguration{
+				SecretId:    "a",
+				SecretKey:   "b",
+				SmsSdkAppId: "c",
+				TemplateID:  "d",
+			},
+		},
+
+		{
+			val: &AliyunProviderConfiguration{},
+			err: `missing Aliyun AccessKeyId`,
+		},
+		{
+			val: &AliyunProviderConfiguration{
+				AccessKeyId: "a",
+			},
+			err: `missing Aliyun AccessKeySecret`,
+		},
+		{
+			val: &AliyunProviderConfiguration{
+				AccessKeyId:     "a",
+				AccessKeySecret: "b",
+			},
+			err: `missing Aliyun SignName`,
+		},
+		{
+			val: &AliyunProviderConfiguration{
+				AccessKeyId:     "a",
+				AccessKeySecret: "b",
+				SignName:        "c",
+			},
+			err: `missing Aliyun TemplateCode`,
+		},
+		{
+			val: &AliyunProviderConfiguration{
+				AccessKeyId:     "a",
+				AccessKeySecret: "b",
+				SignName:        "c",
+				TemplateCode:    "d",
 			},
 		},
 
