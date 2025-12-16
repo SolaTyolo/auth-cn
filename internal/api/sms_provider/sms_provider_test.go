@@ -56,6 +56,19 @@ func TestSmsProvider(t *testing.T) {
 					ApiKey: "test_api_key",
 					Sender: "test_sender",
 				},
+				Tencent: conf.TencentProviderConfiguration{
+					SecretId:    "test_secret_id",
+					SecretKey:   "test_secret_key",
+					Region:      "ap-guangzhou",
+					SmsSdkAppId: "test_sms_sdk_app_id",
+					TemplateID:  "test_template_id",
+				},
+				Aliyun: conf.AliyunProviderConfiguration{
+					AccessKeyId:     "test_access_key_id",
+					AccessKeySecret: "test_access_key_secret",
+					SignName:        "test_sign_name",
+					TemplateCode:    "test_template_code",
+				},
 			},
 		},
 	}
@@ -285,3 +298,162 @@ func (ts *SmsProviderTestSuite) TestTwilioVerifySendSms() {
 		})
 	}
 }
+
+func (ts *SmsProviderTestSuite) TestTencentSendSms() {
+	defer gock.Off()
+	provider, err := NewTencentProvider(ts.Config.Sms.Tencent)
+	require.NoError(ts.T(), err)
+
+	tencentProvider, ok := provider.(*TencentProvider)
+	require.Equal(ts.T(), true, ok)
+
+	phone := "123456789"
+	message := "123456"
+
+	cases := []struct {
+		Desc          string
+		Response      TencentResponse
+		ExpectedError error
+	}{
+		{
+			Desc: "Successfully sent sms",
+			Response: func() TencentResponse {
+				var resp TencentResponse
+				resp.Response.SendStatusSet = []struct {
+					SerialNo      string `json:"SerialNo"`
+					PhoneNumber   string `json:"PhoneNumber"`
+					Fee           int    `json:"Fee"`
+					SessionContext string `json:"SessionContext"`
+					Code          string `json:"Code"`
+					Message       string `json:"Message"`
+					IsoCode       string `json:"IsoCode"`
+				}{
+					{
+						SerialNo:    "test_serial_no",
+						PhoneNumber: phone,
+						Code:        "Ok",
+						Message:     "send success",
+					},
+				}
+				resp.Response.RequestId = "test_request_id"
+				return resp
+			}(),
+			ExpectedError: nil,
+		},
+		{
+			Desc: "Sms status is failed",
+			Response: func() TencentResponse {
+				var resp TencentResponse
+				resp.Response.SendStatusSet = []struct {
+					SerialNo      string `json:"SerialNo"`
+					PhoneNumber   string `json:"PhoneNumber"`
+					Fee           int    `json:"Fee"`
+					SessionContext string `json:"SessionContext"`
+					Code          string `json:"Code"`
+					Message       string `json:"Message"`
+					IsoCode       string `json:"IsoCode"`
+				}{
+					{
+						SerialNo:    "test_serial_no",
+						PhoneNumber: phone,
+						Code:        "InvalidParameter",
+						Message:     "invalid parameter",
+					},
+				}
+				resp.Response.RequestId = "test_request_id"
+				return resp
+			}(),
+			ExpectedError: fmt.Errorf("tencent error: invalid parameter (code: InvalidParameter) for message test_serial_no"),
+		},
+		{
+			Desc: "No response data",
+			Response: func() TencentResponse {
+				var resp TencentResponse
+				resp.Response.SendStatusSet = []struct {
+					SerialNo      string `json:"SerialNo"`
+					PhoneNumber   string `json:"PhoneNumber"`
+					Fee           int    `json:"Fee"`
+					SessionContext string `json:"SessionContext"`
+					Code          string `json:"Code"`
+					Message       string `json:"Message"`
+					IsoCode       string `json:"IsoCode"`
+				}{}
+				resp.Response.RequestId = "test_request_id"
+				return resp
+			}(),
+			ExpectedError: fmt.Errorf("tencent error: no response data"),
+		},
+	}
+
+	for _, c := range cases {
+		ts.Run(c.Desc, func() {
+			gock.New(tencentProvider.APIPath).Post("").
+				MatchHeader("Content-Type", "application/x-www-form-urlencoded").
+				MatchHeader("X-TC-Action", "SendSms").
+				MatchHeader("X-TC-Version", "2021-01-11").
+				Reply(200).JSON(c.Response)
+
+			_, err = tencentProvider.SendSms(phone, message)
+			if c.ExpectedError != nil {
+				require.Equal(ts.T(), c.ExpectedError.Error(), err.Error())
+			} else {
+				require.NoError(ts.T(), err)
+			}
+		})
+	}
+}
+
+func (ts *SmsProviderTestSuite) TestAliyunSendSms() {
+	defer gock.Off()
+	provider, err := NewAliyunProvider(ts.Config.Sms.Aliyun)
+	require.NoError(ts.T(), err)
+
+	aliyunProvider, ok := provider.(*AliyunProvider)
+	require.Equal(ts.T(), true, ok)
+
+	phone := "123456789"
+	message := "123456"
+
+	cases := []struct {
+		Desc          string
+		Response      AliyunResponse
+		ExpectedError error
+	}{
+		{
+			Desc: "Successfully sent sms",
+			Response: AliyunResponse{
+				RequestId: "test_request_id",
+				BizId:     "test_biz_id",
+				Code:      "OK",
+				Message:   "OK",
+			},
+			ExpectedError: nil,
+		},
+		{
+			Desc: "Sms status is failed",
+			Response: AliyunResponse{
+				RequestId: "test_request_id",
+				BizId:     "test_biz_id",
+				Code:      "InvalidSignName",
+				Message:   "invalid sign name",
+			},
+			ExpectedError: fmt.Errorf("aliyun error: invalid sign name (code: InvalidSignName) requestId: test_request_id"),
+		},
+	}
+
+	for _, c := range cases {
+		ts.Run(c.Desc, func() {
+			gock.New(aliyunProvider.APIPath).Post("").
+				MatchHeader("Content-Type", "application/x-www-form-urlencoded").
+				Reply(200).JSON(c.Response)
+
+			_, err = aliyunProvider.SendSms(phone, message)
+			if c.ExpectedError != nil {
+				require.Equal(ts.T(), c.ExpectedError.Error(), err.Error())
+			} else {
+				require.NoError(ts.T(), err)
+			}
+		})
+	}
+}
+
