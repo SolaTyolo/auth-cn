@@ -1,5 +1,5 @@
-.PHONY: all build deps image migrate test vet sec format unused
-.PHONY: check-exhaustive check-gosec check-oapi-codegen check-staticcheck
+.PHONY: all build deps image migrate test vet sec vulncheck format unused
+.PHONY: check-gosec check-govulncheck check-oapi-codegen check-staticcheck
 CHECK_FILES?=./...
 
 ifdef RELEASE_VERSION
@@ -26,6 +26,7 @@ all: vet sec static build ## Run the tests and build the binary.
 build: deps ## Build the binary.
 	CGO_ENABLED=0 go build $(FLAGS)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(FLAGS) -o auth-arm64
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(FLAGS) -o auth-darwin-arm64
 
 build-strip: deps ## Build a stripped binary, for which the version file needs to be rewritten.
 	echo "package utilities" > internal/utilities/version.go
@@ -52,12 +53,19 @@ vet: # Vet the code
 	go vet $(CHECK_FILES)
 
 sec: check-gosec # Check for security vulnerabilities
-	gosec -quiet -exclude-generated $(CHECK_FILES)
-	gosec -quiet -tests -exclude-generated -exclude=G104 $(CHECK_FILES)
+	gosec -quiet -exclude-generated -exclude=G117,G120,G704 $(CHECK_FILES)
+	gosec -quiet -tests -exclude-generated -exclude=G101,G104,G117,G120,G704 $(CHECK_FILES)
 
 check-gosec:
 	@command -v gosec >/dev/null 2>&1 \
 		|| go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+vulncheck: check-govulncheck # Check for known vulnerabilities
+	govulncheck -format json $(CHECK_FILES) | go run ./hack/vulncheck-filter
+
+check-govulncheck:
+	@command -v govulncheck >/dev/null 2>&1 \
+		|| go install golang.org/x/vuln/cmd/govulncheck@latest
 
 unused: | check-staticcheck # Look for unused code
 	@echo "Unused code:"
@@ -66,17 +74,12 @@ unused: | check-staticcheck # Look for unused code
 	@echo "Code used only in _test.go (do move it in those files):"
 	staticcheck -checks U1000 -tests=false $(CHECK_FILES)
 
-static: | check-staticcheck check-exhaustive
+static: | check-staticcheck
 	staticcheck ./...
-	exhaustive ./...
 
 check-staticcheck:
 	@command -v staticcheck >/dev/null 2>&1 \
 		|| go install honnef.co/go/tools/cmd/staticcheck@latest
-
-check-exhaustive:
-	@command -v exhaustive >/dev/null 2>&1 \
-		|| go install github.com/nishanths/exhaustive/cmd/exhaustive@latest
 
 generate: | check-oapi-codegen
 	go generate ./...

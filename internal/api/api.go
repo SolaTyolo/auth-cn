@@ -11,6 +11,7 @@ import (
 	"github.com/supabase/auth/internal/api/apierrors"
 	"github.com/supabase/auth/internal/api/apitask"
 	"github.com/supabase/auth/internal/api/oauthserver"
+	"github.com/supabase/auth/internal/api/provider"
 	"github.com/supabase/auth/internal/conf"
 	"github.com/supabase/auth/internal/hooks/hookshttp"
 	"github.com/supabase/auth/internal/hooks/hookspgfunc"
@@ -31,7 +32,7 @@ const (
 	defaultVersion = "unknown version"
 )
 
-var bearerRegexp = regexp.MustCompile(`^(?:B|b)earer (\S+$)`)
+var bearerRegexp = regexp.MustCompile(`(?i)^bearer (\S+$)`)
 
 // API is the main REST API
 type API struct {
@@ -45,6 +46,7 @@ type API struct {
 	oauthServer  *oauthserver.Server
 	tokenService *tokens.Service
 	mailer       mailer.Mailer
+	oidcCache    *provider.OIDCProviderCache
 
 	// overrideTime can be used to override the clock used by handlers. Should only be used in tests!
 	overrideTime func() time.Time
@@ -95,6 +97,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 		db:      db,
 		version: version,
 	}
+
+	api.oidcCache = provider.NewOIDCProviderCache(globalConfig.External.OIDCProviderCacheTTL)
 
 	for _, o := range opt {
 		o.apply(api)
@@ -151,9 +155,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 	logger := observability.NewStructuredLogger(logrus.StandardLogger(), globalConfig)
 
 	r := newRouter()
-	r.UseBypass(observability.AddRequestID(globalConfig))
-	r.UseBypass(logger)
 	r.UseBypass(recoverer)
+	r.UseBypass(observability.AddRequestID(globalConfig))
 	r.UseBypass(
 		sbff.Middleware(
 			&globalConfig.Security,
@@ -163,7 +166,9 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 			},
 		),
 	)
+	r.UseBypass(logger)
 	r.UseBypass(xffmw.Handler)
+	r.UseBypass(limitRequestBody(1 << 20)) // 1MB
 
 	if globalConfig.API.MaxRequestDuration > 0 {
 		r.UseBypass(timeoutMiddleware(globalConfig.API.MaxRequestDuration))
@@ -298,6 +303,27 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 			})
 		})
 
+		r.Route("/passkeys", func(r *router) {
+			r.Use(api.requirePasskeyEnabled)
+
+			r.Route("/authentication", func(r *router) {
+				r.With(api.limitHandler(api.limiterOpts.PasskeyAuthentication)).
+					Post("/options", api.PasskeyAuthenticationOptions)
+				r.Post("/verify", api.PasskeyAuthenticationVerify)
+			})
+
+			r.With(api.requireAuthentication).With(api.requireNotAnonymous).Route("/registration", func(r *router) {
+				r.Post("/options", api.PasskeyRegistrationOptions)
+				r.Post("/verify", api.PasskeyRegistrationVerify)
+			})
+
+			r.With(api.requireAuthentication).Get("/", api.PasskeyList)
+			r.With(api.requireAuthentication).Route("/{passkey_id}", func(r *router) {
+				r.Patch("/", api.PasskeyUpdate)
+				r.Delete("/", api.PasskeyDelete)
+			})
+		})
+
 		r.Route("/sso", func(r *router) {
 			r.Use(api.requireSAMLEnabled)
 			r.With(api.limitHandler(api.limiterOpts.SSO)).
@@ -330,6 +356,13 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 							r.Use(api.loadFactor)
 							r.Delete("/", api.adminUserDeleteFactor)
 							r.Put("/", api.adminUserUpdateFactor)
+						})
+					})
+
+					r.Route("/passkeys", func(r *router) {
+						r.Get("/", api.AdminPasskeyList)
+						r.Route("/{passkey_id}", func(r *router) {
+							r.Delete("/", api.AdminPasskeyDelete)
 						})
 					})
 
@@ -375,6 +408,21 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 					})
 				})
 			}
+
+			// Custom OAuth/OIDC provider management endpoints
+			if globalConfig.CustomOAuth.Enabled {
+				r.Route("/custom-providers", func(r *router) {
+					// supports both OAuth2 and OIDC via provider_type)
+					r.Get("/", api.adminCustomOAuthProvidersList)   // Optional ?type=oauth2 or ?type=oidc filter
+					r.Post("/", api.adminCustomOAuthProviderCreate) // provider_type in request body
+
+					r.Route("/{identifier}", func(r *router) {
+						r.Get("/", api.adminCustomOAuthProviderGet)
+						r.Put("/", api.adminCustomOAuthProviderUpdate)
+						r.Delete("/", api.adminCustomOAuthProviderDelete)
+					})
+				})
+			}
 		})
 
 		// OAuth Dynamic Client Registration endpoint (public, rate limited)
@@ -399,7 +447,7 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 	})
 
 	corsHandler := cors.New(cors.Options{
-		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete},
 		AllowedHeaders:   globalConfig.CORS.AllAllowedHeaders([]string{"Accept", "Authorization", "Content-Type", "X-Client-IP", "X-Client-Info", audHeaderName, useCookieHeader, APIVersionHeaderName}),
 		ExposedHeaders:   []string{"X-Total-Count", "Link", APIVersionHeaderName},
 		AllowCredentials: true,

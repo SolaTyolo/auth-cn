@@ -152,12 +152,13 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 	}
 
 	if config.Hook.PasswordVerificationAttempt.Enabled {
-		input := v0hooks.PasswordVerificationAttemptInput{
-			UserID: user.ID,
-			Valid:  isValidPassword,
-		}
+		input := v0hooks.NewPasswordVerificationAttemptInput(
+			r,
+			user.ID,
+			isValidPassword,
+		)
 		output := v0hooks.PasswordVerificationAttemptOutput{}
-		if err := a.hooksMgr.InvokeHook(nil, r, &input, &output); err != nil {
+		if err := a.hooksMgr.InvokeHook(nil, r, input, &output); err != nil {
 			return err
 		}
 
@@ -170,7 +171,7 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 					return err
 				}
 			}
-			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, output.Message)
+			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "%s", output.Message)
 		}
 	}
 	if !isValidPassword {
@@ -246,7 +247,7 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 	if err := flowState.VerifyPKCE(params.CodeVerifier); err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeBadCodeVerifier, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeBadCodeVerifier, "%s", err.Error())
 	}
 
 	var token *AccessTokenResponse
@@ -295,8 +296,8 @@ func (a *API) generateAccessToken(r *http.Request, tx *storage.Connection, user 
 	})
 }
 
-func (a *API) issueRefreshToken(r *http.Request, conn *storage.Connection, user *models.User, authenticationMethod models.AuthenticationMethod, grantParams models.GrantParams) (*tokens.AccessTokenResponse, error) {
-	return a.tokenService.IssueRefreshToken(r, make(http.Header), conn, user, authenticationMethod, grantParams)
+func (a *API) issueRefreshToken(r *http.Request, headers http.Header, conn *storage.Connection, user *models.User, authenticationMethod models.AuthenticationMethod, grantParams models.GrantParams) (*tokens.AccessTokenResponse, error) {
+	return a.tokenService.IssueRefreshToken(r, headers, conn, user, authenticationMethod, grantParams)
 }
 
 func (a *API) updateMFASessionAndClaims(r *http.Request, tx *storage.Connection, user *models.User, authenticationMethod models.AuthenticationMethod, grantParams models.GrantParams) (*tokens.AccessTokenResponse, error) {

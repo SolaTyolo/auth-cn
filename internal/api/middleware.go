@@ -136,18 +136,18 @@ func (a *API) limitHandler(lmt *limiter.Limiter) middlewareHandler {
 func (a *API) requireOAuthClientAuth(w http.ResponseWriter, r *http.Request) (context.Context, error) {
 	ctx := r.Context()
 
-	clientID, clientSecret, err := oauthserver.ExtractClientCredentials(r)
+	creds, err := oauthserver.ExtractClientCredentials(r)
 	if err != nil {
-		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "Invalid client credentials: "+err.Error())
+		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "Invalid client credentials: %s", err.Error())
 	}
 
 	// If no client credentials provided, continue without client authentication
-	if clientID == "" {
+	if creds.ClientID == "" {
 		return ctx, nil
 	}
 
 	// Parse client_id as UUID
-	clientUUID, err := uuid.FromString(clientID)
+	clientUUID, err := uuid.FromString(creds.ClientID)
 	if err != nil {
 		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "Invalid client_id format")
 	}
@@ -162,9 +162,14 @@ func (a *API) requireOAuthClientAuth(w http.ResponseWriter, r *http.Request) (co
 		return nil, apierrors.NewInternalServerError("Error validating client credentials").WithInternalError(err)
 	}
 
-	// Validate authentication using centralized logic
-	if err := oauthserver.ValidateClientAuthentication(client, clientSecret); err != nil {
-		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, err.Error())
+	// Validate that the auth method used matches the client's registered method
+	if err := oauthserver.ValidateClientAuthMethod(client, creds.AuthMethod); err != nil {
+		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "%s", err.Error())
+	}
+
+	// Validate authentication using centralized logic (secret verification)
+	if err := oauthserver.ValidateClientAuthentication(client, creds.ClientSecret); err != nil {
+		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "%s", err.Error())
 	}
 
 	// Add authenticated client to context
@@ -350,6 +355,14 @@ func (a *API) requireManualLinkingEnabled(w http.ResponseWriter, req *http.Reque
 	return ctx, nil
 }
 
+func (a *API) requirePasskeyEnabled(w http.ResponseWriter, req *http.Request) (context.Context, error) {
+	ctx := req.Context()
+	if !a.config.Passkey.Enabled {
+		return nil, apierrors.NewNotFoundError(apierrors.ErrorCodePasskeyDisabled, "Passkeys are disabled")
+	}
+	return ctx, nil
+}
+
 func (a *API) databaseCleanup(cleanup models.Cleaner) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +459,19 @@ func (t *timeoutResponseWriter) finallyWrite(w http.ResponseWriter) {
 	w.WriteHeader(t.statusCode)
 	if _, err := w.Write(t.buf.Bytes()); err != nil {
 		logrus.WithError(err).Warn("Write failed")
+	}
+}
+
+// limitRequestBody wraps the request body with http.MaxBytesReader to prevent
+// memory exhaustion from excessively large request bodies (gosec G120).
+func limitRequestBody(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body != nil && r.Body != http.NoBody {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 

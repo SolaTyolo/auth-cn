@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	mathRand "math/rand"
 	"net/http"
 	"net/url"
@@ -145,6 +146,8 @@ func (r *AccessTokenResponse) AsRedirectURL(redirectURL string, extraParams url.
 	extraParams.Set("expires_in", strconv.Itoa(r.ExpiresIn))
 	extraParams.Set("expires_at", strconv.FormatInt(r.ExpiresAt, 10))
 	extraParams.Set("refresh_token", r.RefreshToken)
+	// Add Supabase Auth identifier to help clients distinguish Supabase Auth redirects
+	extraParams.Set("sb", "")
 
 	return redirectURL + "#" + extraParams.Encode()
 }
@@ -206,7 +209,7 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 			if models.IsNotFoundError(err) {
 				return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeRefreshTokenNotFound, "Invalid Refresh Token: Refresh Token Not Found")
 			}
-			return nil, apierrors.NewInternalServerError(err.Error())
+			return nil, apierrors.NewInternalServerError("%s", err.Error())
 		}
 
 		responseHeaders.Set("sb-auth-user-id", user.ID.String())
@@ -283,7 +286,7 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 					retry = true
 					return terr
 				}
-				return apierrors.NewInternalServerError(terr.Error())
+				return apierrors.NewInternalServerError("%s", terr.Error())
 			}
 
 			// Validate OAuth client consistency between session and current request
@@ -317,7 +320,7 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 					retry = true
 					return terr
 				} else if terr != nil {
-					return apierrors.NewInternalServerError(terr.Error())
+					return apierrors.NewInternalServerError("%s", terr.Error())
 				}
 
 				sessionTag := session.DetermineTag(config.Sessions.Tags)
@@ -367,7 +370,7 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 				if token.Revoked {
 					activeRefreshToken, terr := session.FindCurrentlyActiveRefreshToken(tx)
 					if terr != nil && !models.IsNotFoundError(terr) {
-						return apierrors.NewInternalServerError(terr.Error())
+						return apierrors.NewInternalServerError("%s", terr.Error())
 					}
 
 					if activeRefreshToken != nil && activeRefreshToken.Parent.String() == token.Token {
@@ -391,7 +394,7 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 							if config.Security.RefreshTokenRotationEnabled {
 								// Revoke all tokens in token family
 								if err := models.RevokeTokenFamily(tx, token); err != nil {
-									return apierrors.NewInternalServerError(err.Error())
+									return apierrors.NewInternalServerError("%s", err.Error())
 								}
 							}
 
@@ -411,6 +414,55 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 					}
 
 					issuedToken = newToken.Token
+
+					shouldUpgrade := config.Security.RefreshTokenAlgorithmVersion == 2 && config.Security.RefreshTokenUpgradePercentage > 0
+
+					if shouldUpgrade && config.Security.RefreshTokenUpgradePercentage < 100 {
+						// convert the session ID to a number in the range [0, 100) and check whether it should be upgraded
+						// we don't want a % of refresh token requests, but a % of sessions here!
+
+						sessionRand := mathRand.New(mathRand.NewSource(int64(crc32.ChecksumIEEE(session.ID.Bytes())))) // #nosec
+						shouldUpgrade = sessionRand.Intn(100) < config.Security.RefreshTokenUpgradePercentage          // #nosec
+					}
+
+					if shouldUpgrade {
+						// got v1 refresh token that should be upgraded to v2
+						// so discard the previously generated v1 token, revoke it and issue a v2 token instead
+
+						if session.RefreshTokenHmacKey == nil || session.RefreshTokenCounter == nil {
+							if serr := session.SetupRefreshTokenData(config.Security.DBEncryption); serr != nil {
+								return apierrors.NewInternalServerError("failed to set up refresh token data for session").WithInternalError(serr)
+							}
+						} else if session.RefreshTokenCounter != nil {
+							// session already set up, increment the counter by 1
+							counter := *session.RefreshTokenCounter + 1
+							session.RefreshTokenCounter = &counter
+						}
+
+						signingKey, _, kerr := session.GetRefreshTokenHmacKey(config.Security.DBEncryption)
+						if kerr != nil {
+							return apierrors.NewInternalServerError("failed to load session signing key from database").WithInternalError(kerr)
+						}
+
+						issuedToken = (&crypto.RefreshToken{
+							Version:   0,
+							SessionID: session.ID,
+							Counter:   *session.RefreshTokenCounter,
+						}).Encode(signingKey)
+
+						if terr := session.UpdateRefreshTokenCounterAndHmacKey(tx); terr != nil {
+							return apierrors.NewInternalServerError("failed to set up session with refresh token algorithm v2").WithInternalError(terr)
+						}
+
+						newToken.Revoked = true
+						if terr := tx.UpdateOnly(newToken, "revoked"); terr != nil {
+							return apierrors.NewInternalServerError("failed to mark v1 refresh token as revoked").WithInternalError(terr)
+						}
+
+						responseHeaders.Set("sb-auth-refresh-token-counter", strconv.FormatInt(*session.RefreshTokenCounter, 10))
+					}
+
+					responseHeaders.Set("sb-auth-refresh-token-reuse", "false")
 				}
 
 				responseHeaders.Set("sb-auth-refresh-token-prefix", issuedToken[0:5])
@@ -653,11 +705,12 @@ func (s *Service) GenerateAccessToken(r *http.Request, tx *storage.Connection, p
 
 	var gotrueClaims jwt.Claims = claims
 	if config.Hook.CustomAccessToken.Enabled {
-		input := &v0hooks.CustomAccessTokenInput{
-			UserID:               params.User.ID,
-			Claims:               claims,
-			AuthenticationMethod: params.AuthenticationMethod.String(),
-		}
+		input := v0hooks.NewCustomAccessTokenInput(
+			r,
+			params.User.ID,
+			claims,
+			params.AuthenticationMethod.String(),
+		)
 
 		output := &v0hooks.CustomAccessTokenOutput{}
 

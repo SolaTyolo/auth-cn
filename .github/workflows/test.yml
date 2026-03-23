@@ -29,9 +29,9 @@ jobs:
           --health-retries 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Check gofmt
@@ -49,14 +49,15 @@ jobs:
       - name: Run static check
         run: |
           set -x
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install github.com/nishanths/exhaustive/cmd/exhaustive@latest
           make static
       - name: Check gosec
         run: |
           set -x
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
           make sec
+      - name: Run govulncheck
+        run: |
+          set -x
+          make vulncheck
       - name: Init Database
         run: psql -f hack/init_postgres.sql postgresql://postgres:root@localhost:5432/postgres
       - name: Run migrations

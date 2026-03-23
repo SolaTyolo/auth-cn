@@ -51,24 +51,13 @@ type OAuthServerClientListResponse struct {
 
 // oauthServerClientToResponse converts a model to response format
 func oauthServerClientToResponse(client *models.OAuthServerClient) *OAuthServerClientResponse {
-	// Set token endpoint auth methods based on client type
-	var tokenEndpointAuthMethods string
-	// TODO(cemal) :: Remove this once we have the token endpoint auth method stored in the database
-	if client.IsPublic() {
-		// Public clients don't use client authentication
-		tokenEndpointAuthMethods = models.TokenEndpointAuthMethodNone
-	} else {
-		// Confidential clients use client secret authentication
-		tokenEndpointAuthMethods = models.TokenEndpointAuthMethodClientSecretBasic
-	}
-
 	response := &OAuthServerClientResponse{
 		ClientID:   client.ID.String(),
 		ClientType: client.ClientType,
 
 		// OAuth 2.1 DCR fields
 		RedirectURIs:            client.GetRedirectURIs(),
-		TokenEndpointAuthMethod: tokenEndpointAuthMethods,
+		TokenEndpointAuthMethod: client.GetTokenEndpointAuthMethod(),
 		GrantTypes:              client.GetGrantTypes(),
 		ResponseTypes:           []string{"code"}, // Always "code" in OAuth 2.1
 		ClientName:              utilities.StringValue(client.ClientName),
@@ -127,7 +116,7 @@ func (s *Server) AdminOAuthServerClientRegister(w http.ResponseWriter, r *http.R
 
 	client, plaintextSecret, err := s.registerOAuthServerClient(ctx, &params)
 	if err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "%s", err.Error())
 	}
 
 	response := oauthServerClientToResponse(client)
@@ -156,7 +145,7 @@ func (s *Server) OAuthServerClientDynamicRegister(w http.ResponseWriter, r *http
 
 	client, plaintextSecret, err := s.registerOAuthServerClient(ctx, &params)
 	if err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "%s", err.Error())
 	}
 
 	response := oauthServerClientToResponse(client)
