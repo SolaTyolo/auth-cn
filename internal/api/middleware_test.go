@@ -162,16 +162,41 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaInvalid() {
 			http.StatusBadRequest,
 			"captcha protection: request disallowed (invalid-input-secret)",
 		},
+		{
+			"Tencent captcha validation failed",
+			&conf.CaptchaConfiguration{
+				Enabled:  true,
+				Provider: "tencent",
+				Secret:   "testsecret",
+			},
+			http.StatusBadRequest,
+			"captcha protection: request disallowed",
+		},
 	}
 	for _, c := range cases {
 		ts.Run(c.desc, func() {
 			ts.Config.Security.Captcha = *c.captchaConf
 			var buffer bytes.Buffer
+			
+			// Use appropriate token format based on provider
+			var captchaToken string
+			if c.captchaConf.Provider == "tencent" {
+				// Tencent captcha token format: JSON with ticket and randstr
+				tencentToken := map[string]string{
+					"ticket": "test_ticket_123",
+					"randstr": "test_randstr_456",
+				}
+				tokenBytes, _ := json.Marshal(tencentToken)
+				captchaToken = string(tokenBytes)
+			} else {
+				captchaToken = CaptchaResponse
+			}
+			
 			require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
 				"email":    "test@example.com",
 				"password": "secret",
 				"gotrue_meta_security": map[string]interface{}{
-					"captcha_token": CaptchaResponse,
+					"captcha_token": captchaToken,
 				},
 			}))
 			req := httptest.NewRequest(http.MethodPost, "http://localhost", &buffer)
@@ -183,7 +208,12 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaInvalid() {
 
 			_, err := ts.API.verifyCaptcha(w, req)
 			require.Equal(ts.T(), c.expectedCode, err.(*HTTPError).HTTPStatus)
-			require.Equal(ts.T(), c.expectedMsg, err.(*HTTPError).Message)
+			// For tencent, the error message might be different, so we check if it contains the expected prefix
+			if c.captchaConf.Provider == "tencent" {
+				require.Contains(ts.T(), err.(*HTTPError).Message, "captcha protection: request disallowed")
+			} else {
+				require.Equal(ts.T(), c.expectedMsg, err.(*HTTPError).Message)
+			}
 		})
 	}
 }

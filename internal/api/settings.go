@@ -29,6 +29,10 @@ type ProviderSettings struct {
 	Email          bool `json:"email"`
 	Phone          bool `json:"phone"`
 	Zoom           bool `json:"zoom"`
+	Line           bool `json:"line"`
+	Douyin         bool `json:"douyin"`
+	Wechat         bool `json:"wechat"`
+	WechatWork     bool `json:"wechat_work"`
 }
 
 type Settings struct {
@@ -72,6 +76,10 @@ func (a *API) Settings(w http.ResponseWriter, r *http.Request) error {
 			Email:          config.External.Email.Enabled,
 			Phone:          config.External.Phone.Enabled,
 			Zoom:           config.External.Zoom.Enabled,
+			Line:           config.External.Line.Enabled,
+			Douyin:         config.External.Douyin.Enabled,
+			Wechat:         config.External.Wechat.Enabled,
+			WechatWork:     config.External.WechatWork.Enabled,
 		},
 		DisableSignup:     config.DisableSignup,
 		MailerAutoconfirm: config.Mailer.Autoconfirm,
@@ -79,5 +87,6 @@ func (a *API) Settings(w http.ResponseWriter, r *http.Request) error {
 		SmsProvider:       config.Sms.Provider,
 		SAMLEnabled:       config.SAML.Enabled,
 		PasskeysEnabled:   config.Passkey.Enabled,
+		CaptchaProvider:   config.Security.Captcha.Provider,
 	})
 }
