@@ -69,7 +69,7 @@ git merge --ff-only upstream/master   # 或: git merge upstream/master
 git push origin master
 ```
 
-upstream 同步为**纯手动**操作，无自动化 workflow。
+也可在 GitHub Actions 中手动运行 [`.github/workflows/sync-upstream.yml`](.github/workflows/sync-upstream.yml)，自动创建 PR 到 `master`（无定时任务，仅 `workflow_dispatch` 触发）。
 
 ---
 
