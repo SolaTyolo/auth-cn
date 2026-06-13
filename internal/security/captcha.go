@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -53,78 +54,19 @@ func (v *HTTPCaptchaVerifier) Verify(ctx context.Context, token, clientIP string
 		return nil, err
 	}
 
-	return verifyCaptchaCode(captchaResponse, secretKey, clientIP, captchaURL, captchaProvider)
+	return v.verifyCaptchaCode(ctx, token, clientIP, captchaURL)
 }
 
-// buildCaptchaRequestData builds request data for different captcha providers
-func buildCaptchaRequestData(token, secretKey, clientIP, captchaProvider string) (url.Values, error) {
-	switch captchaProvider {
-	case "tencent":
-		return buildTencentCaptchaData(token, secretKey, clientIP)
-	case "hcaptcha", "turnstile":
-		return buildStandardCaptchaData(token, secretKey, clientIP), nil
-	default:
-		return nil, fmt.Errorf("unsupported captcha provider: %s", captchaProvider)
-	}
-}
-
-// buildTencentCaptchaData builds request data for Tencent captcha
-func buildTencentCaptchaData(token, secretKey, clientIP string) (url.Values, error) {
-	data := url.Values{}
-
-	// Tencent captcha requires different parameters
-	// Token format: JSON string with ticket, randstr, and optionally aid
-	var tencentToken struct {
-		Ticket  string `json:"ticket"`
-		Randstr string `json:"randstr"`
-		Aid     string `json:"aid,omitempty"`
-	}
-
-	if err := json.Unmarshal([]byte(token), &tencentToken); err != nil {
-		// Try parsing as colon-separated format: ticket:randstr or aid:ticket:randstr
-		parts := strings.Split(token, ":")
-		if len(parts) == 2 {
-			tencentToken.Ticket = parts[0]
-			tencentToken.Randstr = parts[1]
-		} else if len(parts) == 3 {
-			tencentToken.Aid = parts[0]
-			tencentToken.Ticket = parts[1]
-			tencentToken.Randstr = parts[2]
-		} else {
-			return nil, errors.Wrap(err, "failed to parse tencent captcha token")
-		}
-	}
-
-	if tencentToken.Ticket == "" || tencentToken.Randstr == "" {
-		return nil, errors.New("tencent captcha token missing ticket or randstr")
-	}
-
-	// Tencent captcha API parameters
-	if tencentToken.Aid != "" {
-		data.Set("aid", tencentToken.Aid)
-	}
-	data.Set("AppSecretKey", secretKey)
-	data.Set("Ticket", tencentToken.Ticket)
-	data.Set("Randstr", tencentToken.Randstr)
-	data.Set("UserIP", clientIP)
-
-	return data, nil
-}
-
-// buildStandardCaptchaData builds request data for standard captcha providers (hcaptcha, turnstile)
-func buildStandardCaptchaData(token, secretKey, clientIP string) url.Values {
-	data := url.Values{}
-	data.Set("secret", v.secret)
-	data.Set("response", token)
-	data.Set("remoteip", clientIP)
-	// TODO (darora): pipe through sitekey
-	return data
-}
-
-func verifyCaptchaCode(token, secretKey, clientIP, captchaURL, captchaProvider string) (VerificationResponse, error) {
-	data, err := buildCaptchaRequestData(token, secretKey, clientIP, captchaProvider)
+func (v *HTTPCaptchaVerifier) verifyCaptchaCode(ctx context.Context, token, clientIP, captchaURL string) (*VerificationResponse, error) {
+	data, handled, err := buildCNCaptchaRequest(token, v.secret, clientIP, v.provider)
 	if err != nil {
-		return VerificationResponse{}, err
+		return nil, err
+	}
+	if !handled {
+		data = url.Values{}
+		data.Set("secret", v.secret)
+		data.Set("response", token)
+		data.Set("remoteip", clientIP)
 	}
 
 	r, err := http.NewRequestWithContext(ctx, "POST", captchaURL, strings.NewReader(data.Encode()))
@@ -139,27 +81,18 @@ func verifyCaptchaCode(token, secretKey, clientIP, captchaURL, captchaProvider s
 	}
 	defer utilities.SafeClose(res.Body)
 
-	var verificationResponse VerificationResponse
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read captcha response body")
+	}
 
-	if captchaProvider == "tencent" {
-		// Tencent captcha returns different response format
-		var tencentResponse struct {
-			Response int    `json:"response"`
-			ErrMsg   string `json:"err_msg,omitempty"`
-		}
-		if err := json.NewDecoder(res.Body).Decode(&tencentResponse); err != nil {
-			return VerificationResponse{}, errors.Wrap(err, "failed to decode tencent captcha response: not JSON")
-		}
-		// Tencent captcha: response == 1 means success
-		verificationResponse.Success = tencentResponse.Response == 1
-		if !verificationResponse.Success {
-			verificationResponse.ErrorCodes = []string{tencentResponse.ErrMsg}
-		}
-	} else {
-		// Standard captcha providers (hcaptcha, turnstile)
-		if err := json.NewDecoder(res.Body).Decode(&verificationResponse); err != nil {
-			return VerificationResponse{}, errors.Wrap(err, "failed to decode captcha response: not JSON")
-		}
+	if verificationResponse, handled, err := decodeCNCaptchaResponse(body, v.provider); handled {
+		return verificationResponse, err
+	}
+
+	var verificationResponse VerificationResponse
+	if err := json.Unmarshal(body, &verificationResponse); err != nil {
+		return nil, errors.Wrap(err, "failed to decode captcha response: not JSON")
 	}
 
 	return &verificationResponse, nil
@@ -171,9 +104,19 @@ func getCaptchaURL(captchaProvider string) (string, error) {
 		return "https://hcaptcha.com/siteverify", nil
 	case "turnstile":
 		return "https://challenges.cloudflare.com/turnstile/v0/siteverify", nil
-	case "tencent":
-		return "https://ssl.captcha.qq.com/ticket/verify", nil
 	default:
+		if captchaURL, ok := getCNCaptchaURL(captchaProvider); ok {
+			return captchaURL, nil
+		}
 		return "", fmt.Errorf("captcha Provider %q could not be found", captchaProvider)
+	}
+}
+
+func IsSupportedCaptchaProvider(providerName string) bool {
+	switch providerName {
+	case "hcaptcha", "turnstile":
+		return true
+	default:
+		return isSupportedCNCaptchaProvider(providerName)
 	}
 }

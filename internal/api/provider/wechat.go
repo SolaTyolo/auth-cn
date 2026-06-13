@@ -124,3 +124,11 @@ func (p wechatProvider) GetUserData(ctx context.Context, tok *oauth2.Token) (*Us
 
 	return data, nil
 }
+
+func init() {
+	RegisterCNOAuthProvider("wechat", func(ctx context.Context, config *conf.GlobalConfiguration, scopes string) (OAuthProvider, conf.OAuthProviderConfiguration, error) {
+		pConfig := config.External.Wechat
+		p, err := NewWechatProvider(pConfig, scopes)
+		return p, pConfig, err
+	})
+}

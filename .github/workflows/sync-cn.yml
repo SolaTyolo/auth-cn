@@ -1,0 +1,83 @@
+name: Sync CN Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: "Optional upstream version label for the PR title (e.g. v2.189.0)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-cn:
+    name: Sync master → cn
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout cn
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: cn
+          fetch-depth: 0
+
+      - name: Fetch master
+        run: git fetch origin master
+
+      - name: Check if cn is behind master
+        id: check
+        run: |
+          if git merge-base --is-ancestor origin/master HEAD; then
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+            echo "cn is already up to date with master."
+          else
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+            echo "cn is behind master."
+          fi
+
+      - name: Merge master into cn
+        if: steps.check.outputs.needs_sync == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit origin/master
+
+      - name: Create pull request
+        if: steps.check.outputs.needs_sync == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.upstream_version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(date +%Y-%m-%d)"
+          fi
+          BRANCH="sync/cn-${VERSION}"
+          git checkout -b "$BRANCH"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --base cn \
+            --head "$BRANCH" \
+            --title "chore(cn): sync master (${VERSION})" \
+            --body "$(cat <<'EOF'
+          ## Summary
+          Merge latest `master` (upstream mirror) into `cn`.
+
+          ## Conflict resolution
+          若 PR 有冲突，请参考 [CN_SYNC.md](../CN_SYNC.md)。
+
+          Hot-path files to check:
+          - `internal/api/external.go`
+          - `internal/api/sms_provider/sms_provider.go`
+          - `internal/security/captcha.go`
+          - `internal/conf/configuration.go`
+
+          ## Test plan
+          - [ ] CI passes
+          - [ ] WeChat / Douyin OAuth smoke test
+          - [ ] Tencent / Aliyun SMS smoke test
+          - [ ] Tencent captcha smoke test
+          EOF
+          )"

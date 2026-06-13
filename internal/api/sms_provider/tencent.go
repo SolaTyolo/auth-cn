@@ -106,7 +106,7 @@ func (t *TencentProvider) SendSms(phone string, message string) (string, error) 
 		timestamp, date, sha256Hash(canonicalRequest))
 
 	// Calculate signature
-	secretDate := hmacSha256(date, "TC3"+t.Config.SecretKey)
+	secretDate := hmacSha256(date, []byte("TC3"+t.Config.SecretKey))
 	secretService := hmacSha256("sms", secretDate)
 	secretSigning := hmacSha256("tc3_request", secretService)
 	signature := hexEncode(hmacSha256(stringToSign, secretSigning))
@@ -169,8 +169,8 @@ func sha256Hash(data string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func hmacSha256(data, key string) []byte {
-	h := hmac.New(sha256.New, []byte(key))
+func hmacSha256(data string, key []byte) []byte {
+	h := hmac.New(sha256.New, key)
 	h.Write([]byte(data))
 	return h.Sum(nil)
 }
@@ -179,3 +179,8 @@ func hexEncode(data []byte) string {
 	return fmt.Sprintf("%x", data)
 }
 
+func init() {
+	RegisterCNSMSProvider("tencent", func(config conf.GlobalConfiguration) (SmsProvider, error) {
+		return NewTencentProvider(config.Sms.Tencent)
+	})
+}

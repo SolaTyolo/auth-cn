@@ -158,3 +158,10 @@ func (p wechatWorkProvider) GetUserData(ctx context.Context, tok *oauth2.Token) 
 	return data, nil
 }
 
+func init() {
+	RegisterCNOAuthProvider("wechat_work", func(ctx context.Context, config *conf.GlobalConfiguration, scopes string) (OAuthProvider, conf.OAuthProviderConfiguration, error) {
+		pConfig := config.External.WechatWork
+		p, err := NewWechatWorkProvider(pConfig, scopes)
+		return p, pConfig, err
+	})
+}

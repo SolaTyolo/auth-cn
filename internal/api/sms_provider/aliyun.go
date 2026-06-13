@@ -154,3 +154,8 @@ func percentEncode(s string) string {
 		"%3A", ":")
 }
 
+func init() {
+	RegisterCNSMSProvider("aliyun", func(config conf.GlobalConfiguration) (SmsProvider, error) {
+		return NewAliyunProvider(config.Sms.Aliyun)
+	})
+}
