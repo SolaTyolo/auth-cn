@@ -102,3 +102,10 @@ func (p lineProvider) GetUserData(ctx context.Context, tok *oauth2.Token) (*User
 	return data, nil
 }
 
+func init() {
+	RegisterCNOAuthProvider("line", func(ctx context.Context, config *conf.GlobalConfiguration, scopes string) (OAuthProvider, conf.OAuthProviderConfiguration, error) {
+		pConfig := config.External.Line
+		p, err := NewLineProvider(pConfig, scopes)
+		return p, pConfig, err
+	})
+}

@@ -121,3 +121,10 @@ func (p douyinProvider) GetUserData(ctx context.Context, tok *oauth2.Token) (*Us
 	return data, nil
 }
 
+func init() {
+	RegisterCNOAuthProvider("douyin", func(ctx context.Context, config *conf.GlobalConfiguration, scopes string) (OAuthProvider, conf.OAuthProviderConfiguration, error) {
+		pConfig := config.External.Douyin
+		p, err := NewDouyinProvider(pConfig, scopes)
+		return p, pConfig, err
+	})
+}
