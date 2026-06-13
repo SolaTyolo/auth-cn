@@ -7,9 +7,6 @@ on:
         description: "Optional upstream version label for the PR title (e.g. v2.189.0)"
         required: false
         type: string
-  workflow_run:
-    workflows: ["Sync Upstream"]
-    types: [completed]
 
 permissions:
   contents: write
@@ -19,7 +16,7 @@ jobs:
   sync-cn:
     name: Sync master → cn
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout cn
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -69,7 +66,7 @@ jobs:
           Merge latest `master` (upstream mirror) into `cn`.
 
           ## Conflict resolution
-          If this PR has conflicts, follow [docs/CN_SYNC.md](../docs/CN_SYNC.md).
+          若 PR 有冲突，请参考 [CN_SYNC.md](../CN_SYNC.md)。
 
           Hot-path files to check:
           - `internal/api/external.go`

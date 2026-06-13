@@ -16,12 +16,15 @@ It is originally based on the excellent
 
 If you wish to contribute to the project, please refer to the [contributing guide](/CONTRIBUTING.md).
 
+> **中国区 Fork：** 本仓库在 upstream 基础上扩展了微信/抖音/Line OAuth、腾讯云/阿里云短信等能力。分支管理、upstream 同步与镜像发布说明见 **[CN 分支同步指南](CN_SYNC.md)**。
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
 - [Running in Production](#running-in-production)
 - [Configuration](#configuration)
 - [Endpoints](#endpoints)
+- [CN 分支同步指南](CN_SYNC.md)
 
 ## Quick Start
 
