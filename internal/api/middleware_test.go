@@ -12,6 +12,7 @@ import (
 
 	"github.com/didip/tollbooth/v5"
 	"github.com/didip/tollbooth/v5/limiter"
+	"github.com/gofrs/uuid"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -19,29 +20,30 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/supabase/auth/internal/api/apierrors"
 	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/models"
 	"github.com/supabase/auth/internal/sbff"
+	"github.com/supabase/auth/internal/security"
 	"github.com/supabase/auth/internal/storage"
 )
 
-const (
-	HCaptchaSecret         string = "0x0000000000000000000000000000000000000000"
-	CaptchaResponse        string = "10000000-aaaa-bbbb-cccc-000000000001"
-	TurnstileCaptchaSecret string = "1x0000000000000000000000000000000AA"
-)
+const captchaResponse string = "10000000-aaaa-bbbb-cccc-000000000001"
 
 type MiddlewareTestSuite struct {
 	suite.Suite
-	API    *API
-	Config *conf.GlobalConfiguration
+	API             *API
+	Config          *conf.GlobalConfiguration
+	CaptchaVerifier *MockCaptchaVerifier
 }
 
 func TestMiddlewareFunctions(t *testing.T) {
-	api, config, err := setupAPIForTest()
+	mockCaptcha := &MockCaptchaVerifier{}
+	api, config, err := setupAPIForTest(WithCaptchaVerifier(mockCaptcha))
 	require.NoError(t, err)
 
 	ts := &MiddlewareTestSuite{
-		API:    api,
-		Config: config,
+		API:             api,
+		Config:          config,
+		CaptchaVerifier: mockCaptcha,
 	}
 	defer api.db.Close()
 
@@ -50,6 +52,12 @@ func TestMiddlewareFunctions(t *testing.T) {
 
 func (ts *MiddlewareTestSuite) TestVerifyCaptchaValid() {
 	ts.Config.Security.Captcha.Enabled = true
+	ts.Config.Security.Captcha.Provider = "hcaptcha"
+	ts.Config.Security.Captcha.Secret = "test-secret"
+
+	// Configure mock to return success
+	ts.CaptchaVerifier.Result = &security.VerificationResponse{Success: true}
+	ts.CaptchaVerifier.Err = nil
 
 	adminClaims := &AccessTokenClaims{
 		Role: "supabase_admin",
@@ -57,43 +65,28 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaValid() {
 	adminJwt, err := jwt.NewWithClaims(jwt.SigningMethodHS256, adminClaims).SignedString([]byte(ts.Config.JWT.Secret))
 	require.NoError(ts.T(), err)
 	cases := []struct {
-		desc             string
-		adminJwt         string
-		captcha_token    string
-		captcha_provider string
+		desc          string
+		adminJwt      string
+		captcha_token string
+		expectVerify  bool
 	}{
 		{
 			"Valid captcha response",
 			"",
-			CaptchaResponse,
-			"hcaptcha",
-		},
-		{
-			"Valid captcha response",
-			"",
-			CaptchaResponse,
-			"turnstile",
+			captchaResponse,
+			true,
 		},
 		{
 			"Ignore captcha if admin role is present",
 			adminJwt,
 			"",
-			"hcaptcha",
-		},
-		{
-			"Ignore captcha if admin role is present",
-			adminJwt,
-			"",
-			"turnstile",
+			false,
 		},
 	}
 	for _, c := range cases {
-		ts.Config.Security.Captcha.Provider = c.captcha_provider
-		if c.captcha_provider == "turnstile" {
-			ts.Config.Security.Captcha.Secret = TurnstileCaptchaSecret
-		} else if c.captcha_provider == "hcaptcha" {
-			ts.Config.Security.Captcha.Secret = HCaptchaSecret
-		}
+		// Reset mock state between cases
+		ts.CaptchaVerifier.LastToken = ""
+		ts.CaptchaVerifier.LastClientIP = ""
 
 		var buffer bytes.Buffer
 		require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
@@ -117,6 +110,12 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaValid() {
 		afterCtx, err := ts.API.verifyCaptcha(w, req)
 		require.NoError(ts.T(), err)
 
+		if c.expectVerify {
+			require.Equal(ts.T(), c.captcha_token, ts.CaptchaVerifier.LastToken)
+		} else {
+			require.Empty(ts.T(), ts.CaptchaVerifier.LastToken)
+		}
+
 		body, err := io.ReadAll(req.Body)
 		require.NoError(ts.T(), err)
 
@@ -138,27 +137,19 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaValid() {
 func (ts *MiddlewareTestSuite) TestVerifyCaptchaInvalid() {
 	cases := []struct {
 		desc         string
-		captchaConf  *conf.CaptchaConfiguration
+		errorCodes   []string
 		expectedCode int
 		expectedMsg  string
 	}{
 		{
 			"Captcha validation failed",
-			&conf.CaptchaConfiguration{
-				Enabled:  true,
-				Provider: "hcaptcha",
-				Secret:   "test",
-			},
+			[]string{"not-using-dummy-secret"},
 			http.StatusBadRequest,
 			"captcha protection: request disallowed (not-using-dummy-secret)",
 		},
 		{
 			"Captcha validation failed",
-			&conf.CaptchaConfiguration{
-				Enabled:  true,
-				Provider: "turnstile",
-				Secret:   "anothertest",
-			},
+			[]string{"invalid-input-secret"},
 			http.StatusBadRequest,
 			"captcha protection: request disallowed (invalid-input-secret)",
 		},
@@ -175,15 +166,24 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaInvalid() {
 	}
 	for _, c := range cases {
 		ts.Run(c.desc, func() {
-			ts.Config.Security.Captcha = *c.captchaConf
+			ts.Config.Security.Captcha.Enabled = true
+			ts.Config.Security.Captcha.Provider = "hcaptcha"
+			ts.Config.Security.Captcha.Secret = "test-secret"
+
+			ts.CaptchaVerifier.Result = &security.VerificationResponse{
+				Success:    false,
+				ErrorCodes: c.errorCodes,
+			}
+			ts.CaptchaVerifier.Err = nil
+
 			var buffer bytes.Buffer
-			
+
 			// Use appropriate token format based on provider
 			var captchaToken string
 			if c.captchaConf.Provider == "tencent" {
 				// Tencent captcha token format: JSON with ticket and randstr
 				tencentToken := map[string]string{
-					"ticket": "test_ticket_123",
+					"ticket":  "test_ticket_123",
 					"randstr": "test_randstr_456",
 				}
 				tokenBytes, _ := json.Marshal(tencentToken)
@@ -191,7 +191,7 @@ func (ts *MiddlewareTestSuite) TestVerifyCaptchaInvalid() {
 			} else {
 				captchaToken = CaptchaResponse
 			}
-			
+
 			require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
 				"email":    "test@example.com",
 				"password": "secret",
@@ -411,9 +411,15 @@ func (ts *MiddlewareTestSuite) TestTimeoutMiddleware() {
 	timeoutHandler := timeoutMiddleware(ts.Config.API.MaxRequestDuration)
 
 	slowHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Sleep for 1 second to simulate a slow handler which should trigger the timeout
-		time.Sleep(1 * time.Second)
-		ts.API.handler.ServeHTTP(w, r)
+		// Simulate a slow handler which should trigger the timeout.
+		// Use context-aware wait so the goroutine exits when the timeout fires,
+		// avoiding a data race with test cleanup.
+		select {
+		case <-time.After(1 * time.Second):
+			ts.API.handler.ServeHTTP(w, r)
+		case <-r.Context().Done():
+			return
+		}
 	})
 	timeoutHandler(slowHandler).ServeHTTP(w, req)
 	assert.Equal(ts.T(), http.StatusGatewayTimeout, w.Code)
@@ -856,4 +862,119 @@ func (ts *MiddlewareTestSuite) TestDatabaseCleanup() {
 		})
 	}
 	mockCleanup.AssertNumberOfCalls(ts.T(), "Clean", 1)
+}
+
+func (ts *MiddlewareTestSuite) TestRequireAdminCredentialsSessionCheck() {
+	models.TruncateAll(ts.API.db)
+
+	user, err := models.NewUser("", "admin-session@example.com", "password", ts.Config.JWT.Aud, nil)
+	require.NoError(ts.T(), err)
+	require.NoError(ts.T(), ts.API.db.Create(user))
+
+	session, err := models.NewSession(user.ID, nil)
+	require.NoError(ts.T(), err)
+	require.NoError(ts.T(), ts.API.db.Create(session))
+
+	signClaims := func(claims *AccessTokenClaims) string {
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(ts.Config.JWT.Secret))
+		require.NoError(ts.T(), err)
+		return signed
+	}
+
+	newRequest := func(token string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "http://localhost", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req
+	}
+
+	ts.Run("admin token with valid session is accepted", func() {
+		token := signClaims(&AccessTokenClaims{
+			Role:      "supabase_admin",
+			SessionId: session.ID.String(),
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   user.ID.String(),
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+		})
+
+		_, err := ts.API.requireAdminCredentials(httptest.NewRecorder(), newRequest(token))
+		require.NoError(ts.T(), err)
+	})
+
+	ts.Run("admin token whose session was revoked is rejected", func() {
+		token := signClaims(&AccessTokenClaims{
+			Role:      "supabase_admin",
+			SessionId: session.ID.String(),
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   user.ID.String(),
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+		})
+		require.NoError(ts.T(), models.LogoutSession(ts.API.db, session.ID))
+
+		_, err := ts.API.requireAdminCredentials(httptest.NewRecorder(), newRequest(token))
+		require.Error(ts.T(), err)
+		httpErr, ok := err.(*HTTPError)
+		require.True(ts.T(), ok, "expected HTTPError, got %T", err)
+		require.Equal(ts.T(), apierrors.ErrorCodeSessionNotFound, httpErr.ErrorCode)
+	})
+
+	ts.Run("admin token past session timebox is rejected", func() {
+		freshSession, err := models.NewSession(user.ID, nil)
+		require.NoError(ts.T(), err)
+		require.NoError(ts.T(), ts.API.db.Create(freshSession))
+
+		// Backdate the session past the timebox — pop manages created_at
+		// automatically on Update, so go through raw SQL.
+		require.NoError(ts.T(), ts.API.db.RawQuery(
+			"UPDATE auth.sessions SET created_at = ? WHERE id = ?",
+			time.Now().Add(-48*time.Hour), freshSession.ID,
+		).Exec())
+
+		timebox := time.Hour
+		original := ts.Config.Sessions.Timebox
+		ts.Config.Sessions.Timebox = &timebox
+		defer func() { ts.Config.Sessions.Timebox = original }()
+
+		token := signClaims(&AccessTokenClaims{
+			Role:      "supabase_admin",
+			SessionId: freshSession.ID.String(),
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   user.ID.String(),
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+		})
+
+		_, err = ts.API.requireAdminCredentials(httptest.NewRecorder(), newRequest(token))
+		require.Error(ts.T(), err)
+		httpErr, ok := err.(*HTTPError)
+		require.True(ts.T(), ok, "expected HTTPError, got %T", err)
+		require.Equal(ts.T(), apierrors.ErrorCodeSessionExpired, httpErr.ErrorCode)
+	})
+
+	ts.Run("sessionless service_role token still passes", func() {
+		token := signClaims(&AccessTokenClaims{
+			Role: "service_role",
+			RegisteredClaims: jwt.RegisteredClaims{
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+		})
+
+		_, err := ts.API.requireAdminCredentials(httptest.NewRecorder(), newRequest(token))
+		require.NoError(ts.T(), err)
+	})
+
+	ts.Run("admin token with nil-uuid session_id passes (treated as sessionless)", func() {
+		token := signClaims(&AccessTokenClaims{
+			Role:      "supabase_admin",
+			SessionId: uuid.Nil.String(),
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   user.ID.String(),
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			},
+		})
+
+		_, err := ts.API.requireAdminCredentials(httptest.NewRecorder(), newRequest(token))
+		require.NoError(ts.T(), err)
+	})
 }

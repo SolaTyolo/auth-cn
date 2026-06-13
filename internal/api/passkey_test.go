@@ -22,18 +22,21 @@ import (
 // Flow-specific test methods live in their own files (passkey_register_test.go, etc.).
 type PasskeyTestSuite struct {
 	suite.Suite
-	API         *API
-	Config      *conf.GlobalConfiguration
-	TestUser    *models.User
-	TestSession *models.Session
+	API             *API
+	Config          *conf.GlobalConfiguration
+	TestUser        *models.User
+	TestSession     *models.Session
+	CaptchaVerifier *MockCaptchaVerifier
 }
 
 func TestPasskey(t *testing.T) {
-	api, config, err := setupAPIForTest()
+	mockCaptcha := &MockCaptchaVerifier{}
+	api, config, err := setupAPIForTest(WithCaptchaVerifier(mockCaptcha))
 	require.NoError(t, err)
 	ts := &PasskeyTestSuite{
-		API:    api,
-		Config: config,
+		API:             api,
+		Config:          config,
+		CaptchaVerifier: mockCaptcha,
 	}
 	defer api.db.Close()
 	suite.Run(t, ts)
@@ -41,6 +44,11 @@ func TestPasskey(t *testing.T) {
 
 func (ts *PasskeyTestSuite) SetupTest() {
 	models.TruncateAll(ts.API.db)
+
+	// Reset captcha state
+	ts.Config.Security.Captcha.Enabled = false
+	ts.CaptchaVerifier.Result = nil
+	ts.CaptchaVerifier.Err = nil
 
 	// Enable passkeys
 	ts.Config.Passkey.Enabled = true
@@ -75,6 +83,22 @@ func (ts *PasskeyTestSuite) generateToken(user *models.User, sessionID *uuid.UUI
 	require.NoError(ts.T(), err)
 
 	return token
+}
+
+// enrollVerifiedFactor creates a verified TOTP MFA factor for the user so that
+// user.HasMFAEnabled() returns true, exercising the passkey AAL2 step-up gate.
+func (ts *PasskeyTestSuite) enrollVerifiedFactor(user *models.User) *models.Factor {
+	f := models.NewTOTPFactor(user, fmt.Sprintf("factor-%s", uuid.Must(uuid.NewV4()).String()[:8]))
+	require.NoError(ts.T(), f.SetSecret("secretkey", ts.Config.Security.DBEncryption.Encrypt, ts.Config.Security.DBEncryption.EncryptionKeyID, ts.Config.Security.DBEncryption.EncryptionKey))
+	require.NoError(ts.T(), ts.API.db.Create(f))
+	require.NoError(ts.T(), f.UpdateStatus(ts.API.db, models.FactorStateVerified))
+	return f
+}
+
+// elevateSessionToAAL2 marks the session as AAL2 in the database, simulating a
+// completed MFA verification.
+func (ts *PasskeyTestSuite) elevateSessionToAAL2(session *models.Session, factorID uuid.UUID) {
+	require.NoError(ts.T(), session.UpdateAALAndAssociatedFactor(ts.API.db, models.AAL2, &factorID))
 }
 
 // requestOption configures an HTTP request built by makeRequest.

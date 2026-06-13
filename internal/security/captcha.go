@@ -1,27 +1,20 @@
 package security
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/supabase/auth/internal/conf"
 	"github.com/supabase/auth/internal/utilities"
 )
-
-type GotrueRequest struct {
-	Security GotrueSecurity `json:"gotrue_meta_security"`
-}
-
-type GotrueSecurity struct {
-	Token string `json:"captcha_token"`
-}
 
 type VerificationResponse struct {
 	Success    bool     `json:"success"`
@@ -29,32 +22,36 @@ type VerificationResponse struct {
 	Hostname   string   `json:"hostname"`
 }
 
-var Client *http.Client
-
-func init() {
-	var defaultTimeout time.Duration = time.Second * 10
-	timeoutStr := os.Getenv("GOTRUE_SECURITY_CAPTCHA_TIMEOUT")
-	if timeoutStr != "" {
-		if timeout, err := time.ParseDuration(timeoutStr); err != nil {
-			log.Fatalf("error loading GOTRUE_SECURITY_CAPTCHA_TIMEOUT: %v", err.Error()) // #nosec G706
-		} else if timeout != 0 {
-			defaultTimeout = timeout
-		}
-	}
-
-	Client = &http.Client{Timeout: defaultTimeout}
+// CaptchaVerifier abstracts CAPTCHA verification for different providers (hCaptcha, Cloudflare Turnstile, etc.)
+// and allows for mocking in tests.
+type CaptchaVerifier interface {
+	Verify(ctx context.Context, token, clientIP string) (*VerificationResponse, error)
 }
 
-func VerifyRequest(requestBody *GotrueRequest, clientIP, secretKey, captchaProvider string) (VerificationResponse, error) {
-	captchaResponse := strings.TrimSpace(requestBody.Security.Token)
+// HTTPCaptchaVerifier is the default implementation that calls out to hCaptcha / Turnstile.
+type HTTPCaptchaVerifier struct {
+	client   *http.Client
+	secret   string
+	provider string
+}
 
-	if captchaResponse == "" {
-		return VerificationResponse{}, errors.New("no captcha response (captcha_token) found in request")
+func NewCaptchaVerifier(cfg *conf.CaptchaConfiguration) *HTTPCaptchaVerifier {
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
 	}
 
-	captchaURL, err := GetCaptchaURL(captchaProvider)
+	return &HTTPCaptchaVerifier{
+		client:   &http.Client{Timeout: timeout},
+		secret:   strings.TrimSpace(cfg.Secret),
+		provider: cfg.Provider,
+	}
+}
+
+func (v *HTTPCaptchaVerifier) Verify(ctx context.Context, token, clientIP string) (*VerificationResponse, error) {
+	captchaURL, err := getCaptchaURL(v.provider)
 	if err != nil {
-		return VerificationResponse{}, err
+		return nil, err
 	}
 
 	return verifyCaptchaCode(captchaResponse, secretKey, clientIP, captchaURL, captchaProvider)
@@ -118,7 +115,7 @@ func buildTencentCaptchaData(token, secretKey, clientIP string) (url.Values, err
 // buildStandardCaptchaData builds request data for standard captcha providers (hcaptcha, turnstile)
 func buildStandardCaptchaData(token, secretKey, clientIP string) url.Values {
 	data := url.Values{}
-	data.Set("secret", secretKey)
+	data.Set("secret", v.secret)
 	data.Set("response", token)
 	data.Set("remoteip", clientIP)
 	// TODO (darora): pipe through sitekey
@@ -131,15 +128,15 @@ func verifyCaptchaCode(token, secretKey, clientIP, captchaURL, captchaProvider s
 		return VerificationResponse{}, err
 	}
 
-	r, err := http.NewRequest("POST", captchaURL, strings.NewReader(data.Encode()))
+	r, err := http.NewRequestWithContext(ctx, "POST", captchaURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return VerificationResponse{}, errors.Wrap(err, "couldn't initialize request object for captcha check")
+		return nil, errors.Wrap(err, "couldn't initialize request object for captcha check")
 	}
 	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Add("Content-Length", strconv.Itoa(len(data.Encode())))
-	res, err := Client.Do(r)
+	res, err := v.client.Do(r)
 	if err != nil {
-		return VerificationResponse{}, errors.Wrap(err, "failed to verify captcha response")
+		return nil, errors.Wrap(err, "failed to verify captcha response")
 	}
 	defer utilities.SafeClose(res.Body)
 
@@ -147,7 +144,6 @@ func verifyCaptchaCode(token, secretKey, clientIP, captchaURL, captchaProvider s
 
 	if captchaProvider == "tencent" {
 		// Tencent captcha returns different response format
-		var tencentResponse struct {
 			Response int    `json:"response"`
 			ErrMsg   string `json:"err_msg,omitempty"`
 		}
@@ -165,11 +161,11 @@ func verifyCaptchaCode(token, secretKey, clientIP, captchaURL, captchaProvider s
 			return VerificationResponse{}, errors.Wrap(err, "failed to decode captcha response: not JSON")
 		}
 	}
-
-	return verificationResponse, nil
+	if err := json.NewDecoder(res.Body).Decode(&verificationResponse); err != nil {
+		return nil, errors.Wrap(err, "failed to decode captcha response: not JSON")
 }
 
-func GetCaptchaURL(captchaProvider string) (string, error) {
+func getCaptchaURL(captchaProvider string) (string, error) {
 	switch captchaProvider {
 	case "hcaptcha":
 		return "https://hcaptcha.com/siteverify", nil
