@@ -131,18 +131,17 @@ git push origin cn-v2.189.0
 
 从 `cn` 分支构建并部署 Docker 镜像。
 
-镜像推送到腾讯云容器镜像服务（TCR），workflow 见 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)。
+镜像推送到腾讯云容器镜像服务 CCR（个人版），workflow 见 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)。
 
 需在 GitHub 仓库 Secrets 中配置：
 
 | Secret | 示例 | 说明 |
 |--------|------|------|
-| `TCR_REGISTRY` | `ccr.ccs.tencentyun.com` | TCR 镜像仓库域名 |
-| `TCR_NAMESPACE` | `treelab` | 命名空间 |
-| `TCR_USERNAME` | `100012345678` | TCR 登录用户名 |
-| `TCR_PASSWORD` | *（TCR 控制台获取）* | TCR 登录密码 / 访问凭证 |
+| `CCR_NAMESPACE` | `treelab` | CCR 命名空间 |
+| `CCR_USERNAME` | `100012345678` | 腾讯云账号 ID（CCR 登录用户名） |
+| `CCR_PASSWORD` | *（CCR 控制台 → 访问凭证）* | CCR 登录密码 |
 
-发布镜像地址：`{TCR_REGISTRY}/{TCR_NAMESPACE}/auth-cn:vX.Y.Z`
+发布镜像地址：`ccr.ccs.tencentyun.com/{CCR_NAMESPACE}/auth-cn:vX.Y.Z`
 
 ---
 
