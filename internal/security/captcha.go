@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -54,20 +53,19 @@ func (v *HTTPCaptchaVerifier) Verify(ctx context.Context, token, clientIP string
 		return nil, err
 	}
 
-	return v.verifyCaptchaCode(ctx, token, clientIP, captchaURL)
+	if isSupportedCNCaptchaProvider(v.provider) {
+		return verifyTencentCaptchaCode(ctx, v.client, v.secret, token, clientIP, captchaURL)
+	}
+
+	return v.verifyStandardCaptchaCode(ctx, token, clientIP, captchaURL)
 }
 
-func (v *HTTPCaptchaVerifier) verifyCaptchaCode(ctx context.Context, token, clientIP, captchaURL string) (*VerificationResponse, error) {
-	data, handled, err := buildCNCaptchaRequest(token, v.secret, clientIP, v.provider)
-	if err != nil {
-		return nil, err
-	}
-	if !handled {
-		data = url.Values{}
-		data.Set("secret", v.secret)
-		data.Set("response", token)
-		data.Set("remoteip", clientIP)
-	}
+func (v *HTTPCaptchaVerifier) verifyStandardCaptchaCode(ctx context.Context, token, clientIP, captchaURL string) (*VerificationResponse, error) {
+	data := url.Values{}
+	data.Set("secret", v.secret)
+	data.Set("response", token)
+	data.Set("remoteip", clientIP)
+	// TODO (darora): pipe through sitekey
 
 	r, err := http.NewRequestWithContext(ctx, "POST", captchaURL, strings.NewReader(data.Encode()))
 	if err != nil {
@@ -81,17 +79,9 @@ func (v *HTTPCaptchaVerifier) verifyCaptchaCode(ctx context.Context, token, clie
 	}
 	defer utilities.SafeClose(res.Body)
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read captcha response body")
-	}
-
-	if verificationResponse, handled, err := decodeCNCaptchaResponse(body, v.provider); handled {
-		return verificationResponse, err
-	}
-
 	var verificationResponse VerificationResponse
-	if err := json.Unmarshal(body, &verificationResponse); err != nil {
+
+	if err := json.NewDecoder(res.Body).Decode(&verificationResponse); err != nil {
 		return nil, errors.Wrap(err, "failed to decode captcha response: not JSON")
 	}
 

@@ -1,11 +1,16 @@
 package security
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
+	"github.com/supabase/auth/internal/utilities"
 )
 
 const tencentCaptchaProvider = "tencent"
@@ -21,11 +26,33 @@ func getCNCaptchaURL(providerName string) (string, bool) {
 	return "", false
 }
 
-func buildCNCaptchaRequest(token, secretKey, clientIP, providerName string) (url.Values, bool, error) {
-	if providerName != tencentCaptchaProvider {
-		return nil, false, nil
+func verifyTencentCaptchaCode(ctx context.Context, client *http.Client, secret, token, clientIP, captchaURL string) (*VerificationResponse, error) {
+	data, err := buildTencentCaptchaRequest(token, secret, clientIP)
+	if err != nil {
+		return nil, err
 	}
 
+	r, err := http.NewRequestWithContext(ctx, "POST", captchaURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't initialize request object for captcha check")
+	}
+	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Add("Content-Length", strconv.Itoa(len(data.Encode())))
+	res, err := client.Do(r)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to verify captcha response")
+	}
+	defer utilities.SafeClose(res.Body)
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read captcha response body")
+	}
+
+	return decodeTencentCaptchaResponse(body)
+}
+
+func buildTencentCaptchaRequest(token, secretKey, clientIP string) (url.Values, error) {
 	data := url.Values{}
 
 	var tencentToken struct {
@@ -45,12 +72,12 @@ func buildCNCaptchaRequest(token, secretKey, clientIP, providerName string) (url
 			tencentToken.Ticket = parts[1]
 			tencentToken.Randstr = parts[2]
 		default:
-			return nil, true, errors.Wrap(err, "failed to parse tencent captcha token")
+			return nil, errors.Wrap(err, "failed to parse tencent captcha token")
 		}
 	}
 
 	if tencentToken.Ticket == "" || tencentToken.Randstr == "" {
-		return nil, true, errors.New("tencent captcha token missing ticket or randstr")
+		return nil, errors.New("tencent captcha token missing ticket or randstr")
 	}
 
 	if tencentToken.Aid != "" {
@@ -61,20 +88,16 @@ func buildCNCaptchaRequest(token, secretKey, clientIP, providerName string) (url
 	data.Set("Randstr", tencentToken.Randstr)
 	data.Set("UserIP", clientIP)
 
-	return data, true, nil
+	return data, nil
 }
 
-func decodeCNCaptchaResponse(body []byte, providerName string) (*VerificationResponse, bool, error) {
-	if providerName != tencentCaptchaProvider {
-		return nil, false, nil
-	}
-
+func decodeTencentCaptchaResponse(body []byte) (*VerificationResponse, error) {
 	var tencentResponse struct {
 		Response int    `json:"response"`
 		ErrMsg   string `json:"err_msg,omitempty"`
 	}
 	if err := json.Unmarshal(body, &tencentResponse); err != nil {
-		return nil, true, errors.Wrap(err, "failed to decode tencent captcha response: not JSON")
+		return nil, errors.Wrap(err, "failed to decode tencent captcha response: not JSON")
 	}
 
 	verificationResponse := &VerificationResponse{
@@ -84,5 +107,5 @@ func decodeCNCaptchaResponse(body []byte, providerName string) (*VerificationRes
 		verificationResponse.ErrorCodes = []string{tencentResponse.ErrMsg}
 	}
 
-	return verificationResponse, true, nil
+	return verificationResponse, nil
 }

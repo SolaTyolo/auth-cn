@@ -40,7 +40,6 @@ type Settings struct {
 	SmsProvider       string           `json:"sms_provider"`
 	SAMLEnabled       bool             `json:"saml_enabled"`
 	PasskeysEnabled   bool             `json:"passkeys_enabled"`
-	CaptchaProvider   string           `json:"captcha_provider"`
 }
 
 func (a *API) Settings(w http.ResponseWriter, r *http.Request) error {
